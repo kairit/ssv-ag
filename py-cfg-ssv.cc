@@ -1,11 +1,12 @@
-// py-cfg.cc
+// py-cfg-ssv.cc
 //
-// py-cfg runs a Pitman-Yor process for each nonterminal
-// to estimate an Adaptor Grammar
+// py-cfg-ssv runs a Pitman-Yor process for each nonterminal
+// to estimate an Adaptor Grammar respecting the constraints 
+// given in the labelled data.
 //
 // Extended: Kairit Sirts
 // 05.07.2012
-// Implements the semisupervised version of Adaptor Grammar
+// Implements the semisupervised version of Adaptor Grammars
 
 const char usage[] =
 "py-cfg version of 14th August, 2011\n"
@@ -139,6 +140,12 @@ typedef std::vector<Postreamp> Postreamps;
 
 typedef pycky::tree tree;
 
+typedef std::pair<U, U> Span;
+typedef std::set<Span> SpanSet;
+typedef std::map<S, SpanSet> S_Span;
+typedef std::vector<S_Span> S_Spans;
+
+
 int debug = 0;
 
 struct S_F_incrementer {
@@ -159,8 +166,12 @@ struct RandomNumberGenerator : public std::unary_function<U,U> {
   }
 };
 
+
+// trains contains both the unlabelled and labelled training data,
+// unlabelled are in the beginning.
+// trains_size specifies the number of unlabelled training data items.
 F gibbs_estimate(pycfg_type& g, const Sss& trains,
-		 const std::vector<std::map<S, std::set<std::pair<U, U> > > >& spans,
+		 const S_Spans& spans,
          U trains_size, 
 		 F train_frac, bool train_frac_randomise,
 		 Postreamps& evalcmds, U eval_every,
@@ -317,7 +328,8 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
 	        ec << tps[i] << std::endl;
 	      }
 	    else {  // not trained on; sample a parse and print it
-            p.restricted_inside(trains[i], spans[i], i >= trains_size, g.start);
+            assert (spans[i].size() == 0);
+            p.restricted_inside(trains[i], spans[i], false, g.start);
 	        tree* tp = p.random_tree();
 	        g.incrtree(tp, 1);
 	        foreach (Postreamps, ecit, evalcmds) {
@@ -390,11 +402,11 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
 		        << ", trains[" << i << "] = " << trains[i] 
 	    //      << std::endl << "## g = " << g 
 		        << std::endl;
-          assert(tprob > 0);
+      assert(tprob > 0);
       
-          if (debug >= 1000)
-	          std::cerr << ", tprob = " << tprob;
-          tree* tp1 = p.random_tree();         // sample proposal parse from proposal grammar CKY table
+      if (debug >= 1000)
+	      std::cerr << ", tprob = " << tprob;
+      tree* tp1 = p.random_tree();         // sample proposal parse from proposal grammar CKY table
 
       sum_log2prob += log2(tprob);
       
@@ -479,12 +491,11 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
 	    if (train_flag[i])
 	      (*finalparses_stream_ptr) << tps[i] << std::endl;
 	    else {
-          p.restricted_inside(trains[i], spans[i], i >= trains_size, g.start);
+          p.restricted_inside(trains[i], spans[i], false, g.start);
 	      tree* tp = p.random_tree();
 	      g.incrtree(tp, 1);
 	      (*finalparses_stream_ptr) << tp << std::endl;
 	      g.decrtree(tp, 1);
-          tp->remove_locations(i);
 	      tp->selective_delete();
 	    } 
         (*finalparses_stream_ptr) << std::endl;
@@ -514,7 +525,7 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
 	    ec << tps[i] << std::endl;
       }
     else {
-        p.restricted_inside(trains[i], spans[i], i >= trains_size, g.start);
+        p.restricted_inside(trains[i], spans[i], false, g.start);
         tree* tp = p.random_tree();
       g.incrtree(tp, 1);
       foreach (Postreamps, ecit, evalcmds) {
@@ -562,7 +573,7 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
   return logPcorpus;
 }  // gibbs_estimate()
 
-void extract_constraints(const std::string& data, std::map<S, std::set<std::pair<U, U> > >& span, Ss& terminals) {
+void extract_constraints(const std::string& data, S_Span& span, Ss& terminals) {
     if (debug > 1000)
         std::cerr << "extracts constraints from " << data << std::endl;
     if (data.find("(") == std::string::npos) {
@@ -599,7 +610,7 @@ void extract_constraints(const std::string& data, std::map<S, std::set<std::pair
                 if (brackets == 0) {
                     ind1 = i;
                     extract_constraints(data.substr(ind0, ind1 - ind0), span, terminals);
-                    std::pair<U, U> span_(spanstart, terminals.size());
+                    Span span_(spanstart, terminals.size());
                     span[nonterminal].insert(span_);
                     if (debug > 1000)
                         std::cerr << " # extract_constraints nonterm = " << nonterminal << "  span = (" << span_.first << ", " << span_.second << ")" << std::endl;
@@ -767,7 +778,7 @@ int main(int argc, char** argv) {
   }
 	
   Sss trains;
-  std::vector<std::map<S, std::set<std::pair<U, U> > > > spans;
+  S_Spans spans;
   {
     Ss terminals;
     while (readline_symbols(std::cin, terminals)) 
@@ -776,9 +787,7 @@ int main(int argc, char** argv) {
 		  << trains.size()+1 << " is empty"
 		  << std::endl;
       else {
-        std::map<S, std::set<std::pair<U, U> > > spanmap;
-        std::pair<U, U> span(0, terminals.size());
-        spanmap[g.start].insert(span);
+        S_Span spanmap;
         spans.push_back(spanmap);
 	    trains.push_back(terminals);
       }
@@ -794,21 +803,17 @@ int main(int argc, char** argv) {
       std::cerr << "# Error in " << argv[0]
         << ", can't open labelled data file " << labelled_filename << std::endl;
     assert(labelled_is);
-    std::string data;
+    Str data;
     while (getline(labelled_is, data))
       if (data.empty())
         std::cerr << "## Error in " << argv[0] << ": labelled data sentence "
             << trains.size() - trains_size + 1 << " is empty"
             << std::endl;
       else {
-        std::map<S, std::set<std::pair<U, U> > > spanmap;
+        S_Span spanmap;
         Ss terminals;
         extract_constraints(data, spanmap, terminals);
         trains.push_back(terminals);
-//        if (spanmap.find(g.start) == spanmap.end()) {
-//            std::pair<U, U> span(0, terminals.size());
-//            spanmap[g.start].insert(span);
-//        }
         spans.push_back(spanmap);
       }
   }    
