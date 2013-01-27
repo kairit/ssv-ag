@@ -1,15 +1,17 @@
-// py-cky.h
+// py-cky-ssv.h
 //
-// (c) Mark Johnson, 27th January 2006, last modified 20th July 2011
+// Based on: (c) Mark Johnson, 27th January 2006, last modified 20th July 2011
+// Modified by Kairit Sirts: 22.01.2013
+//
+// Implements the sampler for the semi-supervised Adaptor Grammars
 
-#ifndef PY_CKY_SSV2_H
-#define PY_CKY_SSV2_H
+#ifndef PY_CKY_SSV_H
+#define PY_CKY_SSV_H
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
-// #include <ext/hash_map>
 #include <iostream>
 #include <map>
 #include <set>
@@ -53,7 +55,6 @@ extern int debug;
 
 inline float power(float x, float y) { return powf(x, y); }
 inline double power(double x, double y) { return pow(x, y); }
-// inline long double power(long double x, long double y) { return powl(x, y); }
 
 
 typedef unsigned int U;
@@ -62,7 +63,6 @@ typedef symbol S;
 typedef std::vector<S> Ss;
 
 typedef std::map<S,F> S_F;
-// typedef ext::hash_map<S,F> S_F;
 
 typedef std::pair<S,Ss> SSs;
 typedef std::map<SSs,F> SSs_F;
@@ -130,9 +130,9 @@ inline F random1() { return mt_genrand_res53(); }
 //
 struct pycfg_type {
 
-  pycfg_type(F default_weight=1, F default_pya=1, F default_pyb=1) 
+  pycfg_type(F default_weight=1, F default_pya=1, F default_pyb=1, U labelled_coef=1) 
     : estimate_theta_flag(false), predictive_parse_filter(false), 
-      default_weight(default_weight), default_pya(default_pya), default_pyb(default_pyb),
+      default_weight(default_weight), default_pya(default_pya), default_pyb(default_pyb), labelled_coef(labelled_coef),
       pya_beta_a(0), pya_beta_b(0), pyb_gamma_s(0), pyb_gamma_c(0) { }
 
   typedef unsigned int U;
@@ -218,6 +218,7 @@ struct pycfg_type {
   F default_pya;   //!< default value for pya
   F default_pyb;   //!< default value for pyb
 
+  U labelled_coef;  // coefitsient for reweighting labelled data
   F pya_beta_a;    //!< alpha parameter of Beta prior on pya
   F pya_beta_b;    //!< beta parameter of Beta prior on pya
 
@@ -228,6 +229,7 @@ struct pycfg_type {
   S_F parent_pyb;  //!< pyb value for parent
 
   std::set<S> true_unary;   // non-terminals that are parents of unary rules according to CNF
+
 
   //! get_pya() returns the value of pya for this parent
   //
@@ -331,8 +333,8 @@ struct pycfg_type {
       F prob = 1;
       Ss children;
       cforeach(tree::ptrs_type, it, tp->children) {
-	children.push_back((*it)->cat);
-	prob *= tree_prob(*it);
+        children.push_back((*it)->cat);
+        prob *= tree_prob(*it);
       }
       prob *= rule_prob(tp->cat, children);
       return prob;
@@ -341,9 +343,9 @@ struct pycfg_type {
     U pym = dfind(parent_pym, tp->cat);
     U pyn = dfind(parent_pyn, tp->cat);
     if (tp->count > 0) { // existing node
-      assert(tp->count <= pyn);
+      assert(tp->get_count() <= pyn);
       assert(pym > 0);
-      F prob = (tp->count - pya)/(pyn + pyb);
+      F prob = (tp->get_count() - pya)/(pyn + pyb);
       assert(finite(prob)); assert(prob > 0); assert(prob <= 1);
       return prob;
     }
@@ -429,7 +431,8 @@ struct pycfg_type {
   //! the rules if the cache count is appropriate, and returns
   //! the probability of this tree under the original model.
   //
-  F incrtree(tree* tp, U weight = 1) {
+  F incrtree(tree* tp, bool labelled = false, U weight = 1) {
+    //std::cout << "incrtree: " << *tp << std::endl;
     if (tp->children.empty())  
       return 1;  // terminal node
     assert(weight >= 0);
@@ -438,45 +441,76 @@ struct pycfg_type {
     if (pya == 1) { // don't table this category
       F prob = 1;
       {
-	Ss children;
-	cforeach (tree::ptrs_type, it, tp->children)
-	  children.push_back((*it)->cat);
-	prob *= incrrule(tp->cat, children, estimate_theta_flag*weight);
+        Ss children;
+        cforeach (tree::ptrs_type, it, tp->children)
+          children.push_back((*it)->cat);
+        prob *= incrrule(tp->cat, children, estimate_theta_flag*weight);
       }
       cforeach (tree::ptrs_type, it, tp->children)
-	prob *= incrtree(*it, weight);
+        prob *= incrtree(*it, labelled, weight);
       return prob;
     }
     else if (tp->count > 0) {  // old PY table entry
+      //std::cout << "Old table entry" << std::endl;
       U& pyn = parent_pyn[tp->cat];
+      //std::cout << "old pyn = " << pyn << std::endl;
+      //std::cout << "old counts = " << tp->unlabelled << "#" << tp->labelled << "#" << tp->count << std::endl; 
       F prob = (tp->count - pya)/(pyn + pyb);
       assert(finite(prob)); assert(prob > 0); assert(prob <= 1);
-      tp->count += weight;              // increment entry count
-      pyn += weight;                    // increment PY count
+      if (!labelled)
+        tp->add_count(weight, 0, labelled_coef);
+      else 
+        tp->add_count(0, weight, labelled_coef);
+      //tp->count += weight;              // increment entry count
+      pyn += weight * (labelled ? labelled_coef : 1);                    // increment PY count
+      //std::cout << "new pyn = " << pyn << std::endl;
+      //std::cout << "new counts = " << tp->unlabelled << "#" << tp->labelled << "#" << tp->count << std::endl;
       return prob;
     } 
     else { // new PY table entry
+      //std::cout << "new table entry" << std::endl;
       {
-	Ss terms;
-	tp->terminals(terms);
-	bool inserted ATTRIBUTE_UNUSED = terms_pytrees[terms].insert(tp).second;
-	assert(inserted);
+        Ss terms;
+        tp->terminals(terms);
+        bool inserted ATTRIBUTE_UNUSED = terms_pytrees[terms].insert(tp).second;
+        assert(inserted);
+      
+        /*if (tp->cat == "Word") {
+          U cnt = 0;
+          foreach(sT, it, terms_pytrees[terms]) {
+              std::cout << *it << std::endl;
+              if ((*it)->cat == tp->cat)
+                  ++cnt;
+          }
+          assert(cnt == 1);
+        }*/
       }
       U& pym = parent_pym[tp->cat];
       U& pyn = parent_pyn[tp->cat];
+      //std::cout << "old pym = " << pym << std::endl;
+      //std::cout << "old pyn = " << pyn << std::endl;
+      //std::cout << "old counts = " << tp->unlabelled << "#" << tp->labelled << "#" << tp->count << std::endl; 
       F prob = (pym*pya + pyb)/(pyn + pyb);  // select new table
       assert(finite(prob)); assert(prob > 0); assert(prob <= 1);
-      tp->count += weight;              // increment count
+      if (!labelled)
+        tp->add_count(weight, 0, labelled_coef);
+      else
+        tp->add_count(0, weight, labelled_coef);
+      //tp->count += weight;              // increment count
       pym += 1;                         // one more PY table entry
-      pyn += weight;                    // increment PY count
+      pyn += weight * (labelled ? labelled_coef : 1); // increment PY count
+      //std::cout << "new pym = " << pym << std::endl;
+      //std::cout << "new pyn = " << pyn << std::endl;
+      //std::cout << "new counts = " << tp->unlabelled << "#" << tp->labelled << "#" << tp->count << std::endl;
       {
-	Ss children;
-	cforeach (tree::ptrs_type, it, tp->children)
-	  children.push_back((*it)->cat);
-	prob *= incrrule(tp->cat, children, estimate_theta_flag*weight);
+        Ss children;
+        cforeach (tree::ptrs_type, it, tp->children)
+          children.push_back((*it)->cat);
+	    prob *= incrrule(tp->cat, children, estimate_theta_flag*weight);
       }
+      // When creating a new PY table entry then tree is constructed only once
       cforeach (tree::ptrs_type, it, tp->children)
-	prob *= incrtree(*it, weight);
+	    prob *= incrtree(*it, labelled, weight);
       return prob;
     }
   }  // pycfg_type::incrtree()
@@ -485,29 +519,50 @@ struct pycfg_type {
   //! the rules if the cache count is appropriate, and returns
   //! the probability of this tree under the new model.
   //
-  F decrtree(tree* tp, U weight = 1) {
+  F decrtree(tree* tp, bool labelled = false, U weight = 1) {
+    //std::cout << "decrtree: " << *tp << std::endl;
+    //std::cout << "parent pyms and pyns:" << std::endl;
+    //std::cout << "=====================" << std::endl;
+    //cforeach(S_U, it, parent_pym) {
+      //std::cout << it->first << "\t" << it->second << " " << parent_pyn[it->first] << std::endl;
+      //assert (it->second <= parent_pyn[it->first]);
+    //}
+    //std::cout << "parent pyns:" << std::endl;
+    //std::cout << "============" << std::endl;
+    //cforeach(S_U, it, parent_pyn)
+    //  std::cout << it->first << "\t" << it->second << std::endl;
+    //std::cout << "============" << std::endl;
     if (tp->children.empty())  
       return 1;  // terminal node
     F pya = get_pya(tp->cat);    // PY cache statistics
     if (pya == 1) {  // don't table this category
       F prob = 1;
       {
-	Ss children;
-	cforeach (tree::ptrs_type, it, tp->children)
-	  children.push_back((*it)->cat);
-	F ruleprob = decrrule(tp->cat, children, estimate_theta_flag*weight);
-	assert(ruleprob > 0);
-	prob *= ruleprob;
+        Ss children;
+        cforeach (tree::ptrs_type, it, tp->children)
+          children.push_back((*it)->cat);
+        F ruleprob = decrrule(tp->cat, children, estimate_theta_flag*weight);
+        assert(ruleprob > 0);
+        prob *= ruleprob;
       }
       cforeach (tree::ptrs_type, it, tp->children) 
-	prob *= decrtree(*it, weight);
+        prob *= decrtree(*it, labelled, weight);
       return prob;
     }
+    //std::cout << "cat = " << tp->cat << " count = " << tp->count << " labelled = " << tp->labelled << "  unlabelled = " << tp->unlabelled << "  total = " << tp->get_count() << std::endl;
     assert(weight <= tp->count);
-    tp->count -= weight;
+    //std::cout << "old pyn = " << parent_pyn[tp->cat] << std::endl;
+    //std::cout << "old counts = " << tp->unlabelled << "#" << tp->labelled << "#" << tp->count << std::endl;
+    if (!labelled) 
+      tp->remove_count(weight, 0, labelled_coef);
+    else 
+      tp->remove_count(0, weight, labelled_coef);
+    //tp->count -= weight;
     assert(afind(parent_pyn, tp->cat) >= weight);
-    const U pyn = (parent_pyn[tp->cat] -= weight);
+    const U pyn = (parent_pyn[tp->cat] -= weight * (labelled ? labelled_coef : 1));
     F pyb = get_pyb(tp->cat);
+    //std::cout << "new pyn = " << pyn << std::endl;
+    //std::cout << "old counts = " << tp->unlabelled << "#" << tp->labelled << "#" << tp->count << std::endl;
     if (tp->count > 0) {  // old PY table entry
       assert(pyn > 0);
       F prob = (tp->count - pya)/(pyn + pyb);
@@ -516,13 +571,13 @@ struct pycfg_type {
     } 
     else { // tp->count == 0, remove PY table entry
       {
-	Ss terms;
-	tp->terminals(terms);
-	sT& pytrees = terms_pytrees[terms];
-	sT::size_type nerased ATTRIBUTE_UNUSED = pytrees.erase(tp);
-	assert(nerased == 1);
-	if (pytrees.empty()) 
-	  terms_pytrees.erase(terms);
+        Ss terms;
+        tp->terminals(terms);
+        sT& pytrees = terms_pytrees[terms];
+        sT::size_type nerased ATTRIBUTE_UNUSED = pytrees.erase(tp);
+        assert(nerased == 1);
+        if (pytrees.empty()) 
+          terms_pytrees.erase(terms);
       }
       // Bug: when pym or pyn goes to zero and the parent is erased, 
       // and then the reference to pym or pyn becomes a dangling reference
@@ -531,21 +586,34 @@ struct pycfg_type {
       assert(parent_pym.count(tp->cat) > 0);
       const U pym = --parent_pym[tp->cat];
       if (pym == 0) 
-	parent_pym.erase(tp->cat);
+        parent_pym.erase(tp->cat);
       if (pyn == 0)
-	parent_pyn.erase(tp->cat);
+        parent_pyn.erase(tp->cat);
+      //std::cout << "pym = " << pym << " pya = " << pya << " pyb = " << pyb << std::endl;
       F prob = (pym*pya + pyb)/(pyn + pyb);  // select new table
+      //std::cout << "prob = " << prob << std::endl;
       assert(finite(prob)); assert(prob > 0); assert(prob <= 1);
       {
-	Ss children;
-	cforeach (tree::ptrs_type, it, tp->children)
-	  children.push_back((*it)->cat);
-	prob *= decrrule(tp->cat, children, estimate_theta_flag*weight);
+        Ss children;
+        cforeach (tree::ptrs_type, it, tp->children)
+        children.push_back((*it)->cat);
+        prob *= decrrule(tp->cat, children, estimate_theta_flag*weight);
       }
       assert(prob > 0);
       cforeach (tree::ptrs_type, it, tp->children)
-	prob *= decrtree(*it, weight);
+        prob *= decrtree(*it, labelled, weight);
       // assert(prob > 0);
+      //std::cout << "parent pyms and pyns" << std::endl;
+      //std::cout << "====================" << std::endl;
+      //cforeach(S_U, it, parent_pym) {
+        //std::cout << it->first << "\t" << it->second << " " << parent_pyn[it->first] << std::endl;
+        //assert (it->second <= parent_pyn[it->first]);
+      //}
+      //std::cout << "parent pyns" << std::endl;
+      //std::cout << "===========" << std::endl;
+      //cforeach(S_U, it, parent_pyn)
+        //std::cout << it->first << "\t" << it->second << std::endl;
+      //std::cout << "===========" << std::endl;
       return prob;
     }
   }  // pycfg_type::decrtree()
@@ -612,7 +680,7 @@ struct pycfg_type {
 	     << " --> " << child << std::endl;
     }
     bool old_compact_trees_flag = catcounttree_type::compact_trees;  // save old flag
-    catcounttree_type::compact_trees = false;  // turn off compact_trees
+    catcounttree_type::compact_trees = true;  // turn off compact_trees
     terms_pytrees.for_each(write_pycache(os, parent));
     catcounttree_type::compact_trees = old_compact_trees_flag;
     return os;
@@ -951,8 +1019,9 @@ public:
   typedef St_sT::const_iterator StsTit;
   typedef std::vector<StsTit> StsTits;
   
-  typedef std::set<std::pair<U, U> > spanpair_type;
-  typedef std::map<S, spanpair_type > span_type;
+  typedef std::pair<U, U> Span;
+  typedef std::set<Span> SpanSet;
+  typedef std::map<S, SpanSet> S_Span;
 
   //! index() returns the location of cell in cells[]
   //
@@ -963,7 +1032,7 @@ public:
   static U ncells(U n) { return n*(n+1)/2; }
   
   Ss terminals;
-  span_type spans;
+  S_Span spans;
   S_Fs inactives;
   Stit_Fs actives;
   StsTits pytits;
@@ -978,6 +1047,8 @@ public:
 
   std::map<S, std::map<S, bool> > parent_cache;
   std::map<S, std::map<S, bool> > nary_only_cache;
+  std::vector<std::map<S, F> > pypstat;
+  std::vector<std::map<S, F> > pypstat_discount;
 
   bool check_outside;
 
@@ -985,7 +1056,7 @@ public:
   //! of the start symbol rewriting to the terminals.
   //
   template <typename terminals_type>
-  F inside_(const terminals_type& terminals0, const span_type& spans0, S start) {   
+  F inside_(const terminals_type& terminals0, const S_Span& spans0, S start) {   
 
     terminals = terminals0;
     spans = spans0;
@@ -1008,12 +1079,16 @@ public:
     actives.resize(ncells(n));
     pytits.clear();
     pytits.resize(ncells(n));
+    pypstat.clear();
+    pypstat.resize(ncells(n));
+    pypstat_discount.clear();
+    pypstat_discount.resize(ncells(n));
 
-    if (debug >= 1000) {
+    if (debug >= 10000) {
         std::cerr << "# cky::inside() spans: ";
-        for (span_type::const_iterator it = spans.begin(); it != spans.end(); ++it) {
+        foreach(S_Span, it, spans) {
             std::cerr << it->first;
-            for (spanpair_type::const_iterator jt = it->second.begin(); jt != it->second.end(); ++jt) {
+            cforeach(SpanSet, jt, it->second) {
                 std::cerr << " (" << jt->first << ", " << jt->second << ")";
             }
             std::cerr << "; ";
@@ -1025,9 +1100,8 @@ public:
       pytits[index(i, i+1)] = g.terms_pytrees.find1(terminals[i]);  // PY cache
       inactives[index(i,i+1)][terminals[i]] = 1;
       StsTit& pytit = pytits[index(i,i+1)];
-      if (pytit != g.terms_pytrees.end()) {
+      if (pytit != g.terms_pytrees.end())
 	    add_pycache(pytit->data, inactives[index(i,i+1)], i, i+1);
-      }
       inside_unaryclose(inactives[index(i,i+1)], actives[index(i,i+1)],
 			g.predictive_parse_filter ? &predicteds[index(i,i+1)] : NULL, i, i+1);
       
@@ -1084,9 +1158,11 @@ public:
 		            && !predictedparents->count(parent))
 		            continue;
                   //std::cout << "Adding " << parent << " to inactives" << std::endl;
-		          parentinactives[parent] += leftrightprob 
-		            * power(itparent->second/afind(g.parent_weight, parent), anneal);
-		        }   
+                  if (allowed(parent, left, right))
+		            parentinactives[parent] += leftrightprob 
+		              * power(itparent->second/afind(g.parent_weight, parent), anneal);
+		        }
+                // TODO: check that   
 		        if (!parentactive->key_trie.empty()) 
 		          parentactives[parentactive] += leftrightprob;
 	          }
@@ -1125,33 +1201,45 @@ public:
   }  // pycky::inside()
 
   template <typename terminals_type>
-  F restricted_inside(const terminals_type& terminals, const std::map<S, std::set<std::pair<U, U> > >& spans, bool check, const S& start) {
+  F restricted_inside(const terminals_type& terminals, const S_Span& spans, bool check, const S& start) {
       //std::cout << "restricted inside start: check = " << check << std::endl;
-      check_outside = false;
+      check_outside = check;
       F prob = inside_(terminals, spans, start);
-      if (check) {
+//      if (check) {
           //std::cout << "starting outside" << std::endl;
-          outside(start);
-          check_outside = true;
+          //outside(start);
+          //check_outside = true;
           //std::cout << "inside after outside" << std::endl;
-          prob = inside_(terminals, spans, start);
-      }
+          //prob = inside_(terminals, spans, start);
+      //}
       //std::cout << "restiricted inside: prob = " << prob << std::endl;
       return prob;
   }
 
   void add_pycache(const sT& tps, S_F& inactives, U left, U right) {
+    //std::cout << "add pycache, left = " << left << "  right = " << right << std::endl;
     cforeach (sT, it, tps) {
       symbol cat = (*it)->cat;
       F pya = g.get_pya(cat);    // PY cache statistics
       if (pya == 1.0)
 	    continue;
-      if (allowed(cat, left, right)) {
+      if (consistent_tree(*it, left, right)) {
         //std::cout << "Add pycache: allowed cat = " << cat << " left = " << left << " right = " << right << std::endl;
         F pyb = g.get_pyb(cat);
         U pyn = dfind(g.parent_pyn, cat);
+        pypstat[index(left, right)][cat] += power( ((*it)->count - pya)/(pyn + pyb), anneal);
         inactives[cat] += power( ((*it)->count - pya)/(pyn + pyb), anneal);
-      }
+        //std::cout << "consistent tree in pycache: " << (*it) << std::endl;
+        //std::cout << "cat = " << cat << " count = " << (*it)->count << std::endl;
+        //std::cout << "nodiscount = " << power( ((*it)->count - pya)/(pyn + pyb), anneal) << ": " << pypstat[index(left, right)][cat] << std::endl;
+      } //else {
+        //std::cout << "inconsistent tree in pycache: " << (*it) << std::endl;
+        //F pyb = g.get_pyb(cat);
+        //U pyn = dfind(g.parent_pyn, cat);
+        //std::cout << "cat = " << cat << " count = " << (*it)->count << std::endl;
+        //pypstat_discount[index(left, right)][cat] += power( ((*it)->count - pya)/(pyn + pyb), anneal);
+        //std::cout << "discount = " << power( ((*it)->count - pya)/(pyn + pyb), anneal) << ": " << pypstat_discount[index(left, right)][cat] << std::endl;
+      //}
     }
   }  // pycky::add_cache()
 
@@ -1159,10 +1247,10 @@ public:
   bool allowed(const S& cat, U left, U right)  {
       if (!check_outside) 
           return true;
-/*      for (span_type::const_iterator it = spans.begin(); it != spans.end(); ++it) {
+      cforeach(S_Span, it, spans) {
           S term = it->first;
-          std::set<std::pair<U, U> > areas = it->second;
-          for (std::set<std::pair<U, U> >::const_iterator jt = areas.begin(); jt != areas.end(); ++jt) {
+          SpanSet areas = it->second;
+          cforeach(SpanSet, jt, areas) {
               U l = jt->first, r = jt->second;
               // If the span area matches the input area
               if (left == l && right == r) {
@@ -1172,25 +1260,22 @@ public:
               }
               // If span area is bigger than the input area 
               else if ((left > l && right <= r) || (left >= l && right < r)) {
-                  // cat and span term cannot be the same
-                  if (cat == term)
-                      return false;
-                  // cat cannot be the parent of stem
-                  if (parent_of_child(cat, term))
+                  // cat and span term cannot be the same nor can cat be the parent of the term
+                  if (cat == term || parent_of_child(cat, term))
                       return false;
                   // If cat and term are not in the same branch, so neither is neither's ascendant nor descendant
-                  if (!parent_of_child(cat, term) && !parent_of_child(term, cat))
+                  // We don't have to check !parent_of_child(cat, term) because we already know that this is true
+                  assert (!parent_of_child(cat, term));
+                  if (!parent_of_child(term, cat))
                       return false;
               }
               // If span area is smaller than the input area
               else if (left <= l && right >= r) {
-                  // cat and span term cannot be the same
-                  if (cat == term)
+                  // cat and span term cannot be the same, nor can term be the parent of cat
+                  if (cat == term || parent_of_child(term, cat))
                       return false;
-                  // If span term is the parent of the input term
-                  if (parent_of_child(term, cat))
-                      return false;
-                  if (!parent_of_child(cat, term) && !parent_of_child(term, cat))
+                  assert (!parent_of_child(term, cat));
+                  if (!parent_of_child(cat, term))
                       return false;
               }
               // If input area overlaps several span areas then nothing is allowed
@@ -1198,19 +1283,34 @@ public:
                   return false;
           }
       }
-*/
+
 //      if (check_outside) {
-      U ind = index(left, right);
-      if (outside_inactives[ind].find(cat) == outside_inactives[ind].end()) 
-          return false;
+//      U ind = index(left, right);
+//      if (outside_inactives[ind].find(cat) == outside_inactives[ind].end()) 
+//          return false;
 //      }
       return true;
   }
 
 
   bool expansion_allowed(Stit& it, const S& cat, U left, U right) {
+      typedef std::map<S, St_S_F> trietype;
       if (!check_outside) 
           return true;
+      for (U i = right + 1; i <= terminals.size(); ++i) {
+          cforeach(trietype, it0, it->key_trie) {
+              S inactive = it0->first;
+              if (allowed(inactive, right, i)) {
+                  cforeach(S_F, it1, it0->second.data) {
+                  S parent = it1->first;
+                      if (allowed(parent, left, i))
+                          return true;
+                  }
+              }
+          }
+      }
+      return false;
+  }
       //std::cout << "checking expansion: cat = " << cat << " right = " << right << std::endl;
 /*      for (span_type::const_iterator sit = spans.begin(); sit != spans.end(); ++sit) {
           S spanterm = sit->first;
@@ -1224,12 +1324,11 @@ public:
       }
 */
 //      if (check_outside) {
-      U ind = index(left, right);
-      if (outside_actives[ind].find(it) == outside_actives[ind].end())
-          return false;
+//      U ind = index(left, right);
+//      if (outside_actives[ind].find(it) == outside_actives[ind].end())
+//          return false;
  //     }
-      return true;
-  }
+ //     return true;
 
   bool parent_of_child(const S& parent, const S& child) {
     std::map<S, std::map<S, bool> >::const_iterator parent_it = parent_cache.find(parent);
@@ -1322,6 +1421,7 @@ public:
   } // pycky::inside_unaryclose()
 
   void outside(const S start) {
+      //std::cout << "outside start" << std::endl;
       U n = terminals.size();
       //std::cout << "terminals = " << terminals << " n = " << n << std::endl;
       outside_inactives.clear();
@@ -1414,7 +1514,7 @@ public:
   }
 
   void outside_unaryclose(S_F& outsides, U left, U right) {
-    //std::cout << "outside_unaryclose: outsides = " << outsides << std::endl;
+    //std::cout << "outside_unaryclose: left = " << left << " right = " << right << " outsides = " << outsides << std::endl;
     F delta = 1;
     S_F delta_prob1 = outsides;
     S_F delta_prob0;
@@ -1427,13 +1527,11 @@ public:
 
         cforeach (S_F, it0, delta_prob0) {
 	        S parent = it0->first;
-            //std::cout << "parent = " << parent << std::endl;
             cforeach(S_S_F, it, g.unarychild_parent_weight) {
                 S child = it->first;
-                //std::cout << "child = " << child << std::endl;
                 S_F::const_iterator it1 = it->second.find(parent);
 	            if (it1 != it->second.end()) {
-                    //std::cout << "parent and child compatible" << std::endl;
+                    //std::cout << parent << " and " << child << " compatible" << std::endl;
                     if ((right - left) == 1 && g.true_unary.find(parent) != g.true_unary.end() && child != terminals[left]) {
                         //std::cout << "parent in true unary and child != terminal" << std::endl;
                         continue;
@@ -1466,46 +1564,55 @@ public:
   } // pycky::outside_unaryclose()
 
   Ss ordered_terms(const S& cat, U left, U right) {
-      U end = left;
-      Ss ret;
-      S cand;
-      U r0 = 0;
-      while (end < right) {
-        cand = "";
-        r0 = 0;
-        cforeach(span_type, it, spans) {
-            S sym = it->first;
-            if (cat == sym || parent_of_child(cat, sym)) {
-                cforeach(spanpair_type, it1, it->second) {
-                    U l = it1->first, r = it1->second;
-                    if (end == l && right >= r) {
-                        if ((cand == "" || parent_of_child(sym, cand)) && (r0 == 0 || r >= r0)) {
-                            cand = sym;
-                            r0 = r;
-                        }
-                    }
-                }
+    //std::cout << "ordered terms: cat = " << cat << " left = " << left << " right = " << right << std::endl;
+    U end = left;
+    Ss ret;
+    S cand;
+    U r0 = 0;
+    while (end < right) {
+      //std::cout << "end = " << end << std::endl;
+      cand = "";
+      r0 = end;
+      cforeach(S_Span, it, spans) {
+        S sym = it->first;
+        //std::cout << "sym = " << sym << std::endl;
+        if (cat == sym || parent_of_child(cat, sym)) {
+          //std::cout << "cat is sym or parent of sym" << std::endl;
+          cforeach(SpanSet, it1, it->second) {
+            U l = it1->first, r = it1->second;
+            //std::cout << "l = " << l << " r = " << r << std::endl; 
+            if (end == l && right >= r) {
+              if ((cand == "" || parent_of_child(sym, cand)) && (r0 == end || r >= r0)) {
+                //std::cout << sym << " is suitable" << std::endl;          
+                cand = sym;
+                r0 = r;
+              }
             }
+          }
         }
-        if (cand != "")
-            ret.push_back(cand);
-        end = r0;
-        if (end == 0)
-            break;
       }
-      if (end > r0)
-          ret.clear();
-      return ret;
+      if (cand != "")
+        ret.push_back(cand);
+      if (r0 > end)
+        end = r0;
+      else
+        break;
+      //std::cout << "ret = " << ret << " end = " << end << std::endl;
+    }
+    //std::cout << "end = " << end << " r0 = " << r0 << std::endl;
+    if (end != right)
+      ret.clear();
+    //std::cout << "ret = " << ret << std::endl;
+    return ret;
   }
 
   bool compatible(const S& term, U left, U right) {
       //std::cout << "compatible start: term = " << term << " left = " << left << " right = " << right << std::endl; 
-      Ss leafs = ordered_terms(term, left, right);
-      //std::cout << "leaves = " << leafs << std::endl;
-      if (leafs.size() == 0) {
-          cforeach(span_type, spanit, spans) {
+      Ss leaves = ordered_terms(term, left, right);
+      if (leaves.size() == 0) {
+          cforeach(S_Span, spanit, spans) {
               S sym = spanit->first;
-              cforeach(spanpair_type, pairit, spanit->second) {
+              cforeach(SpanSet, pairit, spanit->second) {
                   U l = pairit->first, r = pairit->second;
                   if (l <= left && r >= right && parent_of_child(sym, term))
                       if (right - left == 1 || g.true_unary.find(term) == g.true_unary.end()) {
@@ -1515,7 +1622,8 @@ public:
           }
           return false;
       }
-      return compatible_(leafs, term, left, right);
+      //std::cout << "leaves = " << leaves << std::endl;
+      return compatible_(leaves, term, left, right);
   }
 
   bool compatible_(const Ss& leafs, const S& term, U left, U right) {
@@ -1552,7 +1660,7 @@ public:
               //std::cout << "right leaves = " << rightleaves << std::endl;
               U midind = left;
               cforeach(Ss, leafit, leftleaves) {
-                cforeach(spanpair_type, jt, spans[*leafit])
+                cforeach(SpanSet, jt, spans[*leafit])
                     if (jt->first == midind) {
                         midind = jt->second;
                         break;
@@ -1586,6 +1694,8 @@ public:
 
 
   bool consistent_tree(const tree* tp, U left, U right)  {
+    if (!check_outside)
+        return true;
     S cat = tp->cat;
     //std::cout << "consistent tree: cat = " << cat << " left = " << left << " right = " << right << std::endl;
     if (!allowed(cat, left, right)) {
@@ -1620,8 +1730,9 @@ public:
   //
   tree* random_inactive(const S parent, F parentprob, 
 			const U left, const U right) {
-
-    //std::cout << std::endl << "random_inactive start: parent = " << parent << " prob = " << parentprob << " left = " << left << " right = " << right << std::endl;
+    
+    if (debug >= 1000)
+      std::cerr << std::endl << "random_inactive start: parent = " << parent << " prob = " << parentprob << " left = " << left << " right = " << right << std::endl;
     if (left+1 == right && parent == terminals[left]) {
       //std::cout << "random inactive end: tree of leaf returned" << std::endl;
       return new tree(parent);
@@ -1632,7 +1743,8 @@ public:
     F rulefactor = 1;
     //std::cout << "before computing discount " << std::endl; 
     //std::cout << "pya = " << pya << std::endl;
-    F discount = 0;
+/*    F discount = 0;
+    F nodiscount = 0;
     if (pya != 1) {
       F pyb = g.get_pyb(parent);
       //std::cout << "pyb = " << pyb << std::endl;
@@ -1646,19 +1758,33 @@ public:
             if (cat != parent)
                 continue;
             if (!consistent_tree(*it, left, right)) {
-                //std::cout << "count = " << (*it)->count << std::endl;
+                std::cout << "inconsistent tree = " << *it << std::endl;
+                std::cout << "count = " << (*it)->count << std::endl;
                 discount += power( ((*it)->count - pya)/(pyn + pyb), anneal);
-                //std::cout << "discount = " << discount << std::endl;
+                std::cout << "discount = " << power( ((*it)->count - pya)/(pyn + pyb), anneal) << ": "<< discount << std::endl;
+            } else  {
+                std::cout << "consistent tree = " << *it << std::endl;
+                std::cout << "count = " << (*it)->count << std::endl;
+                nodiscount += power( ((*it)->count - pya)/(pyn + pyb), anneal);
+                std::cout << "nodiscount = " << power( ((*it)->count - pya)/(pyn + pyb), anneal) << ": "<< nodiscount << std::endl;
             }
         }
       }
     }
+    std::cout << "discounts: " << pypstat_discount[index(left, right)][parent]  << " " << discount << std::endl;
+    std::cout << "no discounts: " << pypstat[index(left, right)][parent]  << " " << nodiscount << std::endl;
+    assert (abs(pypstat_discount[index(left, right)][parent] - discount) < 1e-25);
+    assert (abs(pypstat[index(left, right)][parent] - nodiscount) < 1e-25);
     //std::cout << "discount = " << discount << std::endl;
-    //std::cout << "discounted prob = " << parentprob - discount << std::endl;
+*/
+//    F probthreshold = (parentprob - discount) * random1();
+    F probthreshold = parentprob * random1();
+    
+//    if (debug >= 1000)
+//      std::cerr << "discount = " << discount << " discounted = " << parentprob - discount << " threshold = " << probthreshold << std::endl;
 
-    F probthreshold = (parentprob - discount) * random1();
-
-    if (probthreshold == 0) {
+    if (probthreshold <= 0) {
+        std::cout << "probthreshold = " << probthreshold << std::endl;
         U n = terminals.size();
         for (U gap = 1; gap <= n; ++gap) {// non-terminals
             for (U left = 0; left + gap <= n; ++left) {
@@ -1669,7 +1795,13 @@ public:
 	            std::cerr << "# cky::inside() actives[" << left << "," << right << "] = " 
 		                << actives[ind] << std::endl;
                 
-                std::cerr << "cky::outside() inactives[" << left << "," << right << "] = " << outside_inactives[ind] << std::endl;
+                std::cerr << "# cky::outside() inactives[" << left << "," << right << "] = " << outside_inactives[ind] << std::endl;
+                std::cerr << "# cky::inside() pytits[" << left << "," << right << "] = ";
+                if (pytits[ind] == g.terms_pytrees.end())
+                    std::cerr << "()" << std::endl;
+                else
+                  std::cerr << pytits[ind]->data << std::endl;
+
             }
         }
         exit(EXIT_FAILURE);
@@ -1687,7 +1819,10 @@ public:
 	      if (cat != parent)
 	        continue;
           if (consistent_tree(*it, left, right)) {
+            F prob = power( ((*it)->count - pya)/(pyn + pyb), anneal);
             probsofar += power( ((*it)->count - pya)/(pyn + pyb), anneal);
+            if (debug >= 1000)
+              std::cerr << "prob of cached tree = " << prob << " probsofar = " << probsofar << std::endl;
 	        if (probsofar >= probthreshold) {
                 //std::cout << "random inactive end: tree from cache returned" << std::endl;
 	            return *it;
@@ -1709,19 +1844,23 @@ public:
     
     // try unary rules
 
-    //std::cout << "trying unary rules" << std::endl;
+    if (debug >= 1000) 
+      std::cerr << "trying unary rules" << std::endl;
     //std::cout << "parent inactives: [" << left << ", " << right << "]: " << parentinactives << std::endl;
 
     cforeach (S_F, it0, parentinactives) {
       S child = it0->first;
       F childprob = it0->second;
-      //std::cout << "child = " << child << " prob = " << childprob << std::endl;
+      if (debug >= 1000)
+        std::cerr << "child = " << child << " prob = " << childprob << std::endl;
       S_S_F::const_iterator it1 = g.unarychild_parent_weight.find(child);
       if (it1 != g.unarychild_parent_weight.end()) {
 	    const S_F& parent1_weight = it1->second;
+        F prob = childprob * power(dfind(parent1_weight, parent)*rulefactor, anneal);
 	    probsofar += childprob 
 	      * power(dfind(parent1_weight, parent)*rulefactor, anneal);
-        //std::cout << "prob so far = " << probsofar << std::endl;
+        if (debug >= 1000)
+          std::cerr << "prob of rule = " << prob << "  prob so far = " << probsofar << std::endl;
 	    if (probsofar >= probthreshold) {
           //std::cout << "prob so far exceeding threshold, calling random inactive" << std::endl;
 	      tp->children.push_back(random_inactive(child, childprob, left, right));
@@ -1730,7 +1869,8 @@ public:
 	    }
       }
     }
-    //std::cout << "After unary rules: probsofar = " << probsofar << std::endl;
+    if (debug >= 1000)
+      std::cerr << "After unary rules: probsofar = " << probsofar << std::endl;
   
     // try binary rules
 
@@ -1757,9 +1897,11 @@ public:
 	        S_F::const_iterator it = parentactive->data.find(parent);
 	        if (it != parentactive->data.end()) {
               //std::cout << "first = " << it->first << " second = " << it->second << std::endl;
+              F prob = leftprob * rightprob * power(it->second*rulefactor, anneal);
 	          probsofar += leftprob * rightprob 
 		        * power(it->second*rulefactor, anneal);
-              //std::cout << "prob so far = " << probsofar << " prob threshold = " << probthreshold << std::endl;
+              if (debug >= 1000)
+                std::cerr << "prob = " << prob << " prob so far = " << probsofar <<  std::endl;
 	          if (probsofar >= probthreshold) {
 		        random_active(leftactive, leftprob, left, mid, tp->children);
 		        tp->children.push_back(random_inactive(rightinactive, rightprob, mid, right));
@@ -1790,6 +1932,12 @@ public:
 	             << actives[ind] << std::endl;
                 
             std::cerr << "cky::outside() inactives[" << left << "," << right << "] = " << outside_inactives[ind] << std::endl;
+            std::cerr << "# cky::inside() pytits[" << left << "," << right << "] = ";
+            if (pytits[ind] == g.terms_pytrees.end())
+              std::cerr << "()" << std::endl;
+            else
+              std::cerr << pytits[ind]->data << std::endl;
+
         }
     }
     exit(EXIT_FAILURE);
