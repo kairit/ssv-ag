@@ -21,7 +21,7 @@ const char usage[] =
 "       [-T anneal-temp-start] [-t anneal-temp-stop] [-m anneal-its]\n"
 "       [-Z ztemp] [-z zits]\n"
 "       [-X eval-cmd] [-x eval-every]\n"
-"       [-l labelled]\n"
+"       [-l labelled] [-y lab-weight]\n"
 "       grammar.lt < train.yld\n"
 "\n"
 " -d debug        -- debug level\n"
@@ -54,7 +54,8 @@ const char usage[] =
 " -z zits         -- perform zits iterations at temperature ztemp at end of run\n"
 " -X eval-cmd     -- pipe each run's parses into this command (empty line separates runs)\n"
 " -x eval-every   -- pipe trees into the eval-cmd every eval-every iterations\n"
-" -l labelled     -- path to the file containing partially or fully bracketed data"
+" -l labelled     -- path to the file containing partially or fully bracketed data\n"
+" -y lab-weight   -- weight for labelled data"
 "\n"
 "Bracketing must conform to the grammar and be for example of the form:\n"
 " (Morph s a l t) (Morph i) (Morph n e s s)"
@@ -173,7 +174,8 @@ struct RandomNumberGenerator : public std::unary_function<U,U> {
 F gibbs_estimate(pycfg_type& g, const Sss& trains,
 		 const S_Spans& spans,
          U trains_size, 
-		 F train_frac, bool train_frac_randomise,
+		 F train_frac, 
+         bool train_frac_randomise,
 		 Postreamps& evalcmds, U eval_every,
 		 U niterations = 100, 
 		 F anneal_start = 1, F anneal_stop = 1, U anneal_its = 0,
@@ -229,7 +231,7 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
 
     if (debug >= 1000)
         if (i >= trains_size)
-            std::cerr << ", labelled";
+            std::cerr << ", labelled  ";
     
     nwords += trains[i].size();
 
@@ -253,7 +255,10 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
       std::cerr << ", tps[" << i << "] = " << tps[i] << std::endl;
     
     if (!delayed_initialization)
-      g.incrtree(tps[i]);        // incremental initialisation
+      g.incrtree(tps[i], i >= trains_size);        // incremental initialisation
+    if (debug >= 1000) {
+      std::cerr << ", tps[" << i << "] = " << tps[i] << std::endl;
+    }
   }
 
   //std::cout << "data initialized" << std::endl;
@@ -261,7 +266,7 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
   if (delayed_initialization)    // collect statistics from the random trees
     for (unsigned i = 0; i < n; ++i) 
       if (train_flag[i])
-	    g.incrtree(tps[i]);
+	    g.incrtree(tps[i], i >= trains_size);
 
   if (trace_stream_ptr)
     *trace_stream_ptr << "# " << nwords << " tokens in " 
@@ -331,12 +336,12 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
             assert (spans[i].size() == 0);
             p.restricted_inside(trains[i], spans[i], false, g.start);
 	        tree* tp = p.random_tree();
-	        g.incrtree(tp, 1);
+	        g.incrtree(tp);
 	        foreach (Postreamps, ecit, evalcmds) {
 	          pstream::ostream& ec = **ecit;
 	          ec << tp << std::endl;
 	        }
-	        g.decrtree(tp, 1);
+	        g.decrtree(tp);
 	        tp->selective_delete();
 	    }  
       }
@@ -368,12 +373,23 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
 
       if (debug >= 1000)
           if (i >= trains_size)
-              std::cerr << ", labelled";
+              std::cerr << ", labelled  ";
 
       tree* tp0 = tps[i];                // get the old parse for sentence to resample
       assert(tp0);
-    
-      F pi0 = g.decrtree(tp0);       // remove the old parse's fragments from the CRPs
+      
+      F pi0;
+      //std::cout << "# tp0 = " << tp0 << std::endl;
+
+      typedef pycky::sT sT;
+      //std::cout << "trees for the terminals:" << std::endl;
+      //foreach(sT, it, g.terms_pytrees[trains[i]])
+        //std::cout << *it << std::endl;
+      pi0 = g.decrtree(tp0, i >= trains_size);       // remove the old parse's fragments from the CRPs
+      //std::cout << "# tp0 after decreasing " << tp0 << std::endl;
+      //std::cout << "trees for the terminals:" << std::endl;
+      //foreach(sT, it, g.terms_pytrees[trains[i]])
+        //std::cout << *it << std::endl;
       if (pi0 <= 0) 
 	    std::cerr << "## " << HERE 
 		  << " Underflow in gibbs_estimate() while computing pi0 = decrtree(tp0):"
@@ -413,11 +429,19 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
       F r1 = g.tree_prob(tp1);
       // assert(r1 > 0);
       
+      //std::cout << i << ": " << trains[i] << std::endl;
+      //std::cout << i0 << " " << unchanged << " " << rejected << std::endl; 
+      //if (spans[i].size() > 0)
+      //    std::cout << spans[i] << std::endl;
+      //std::cout << "tp0:" << std::endl << "==========================" << std::endl << *tp0 << std::endl;
+      //std::cout << "tp1:" << std::endl << "==========================" << std::endl << *tp1 << std::endl;
+      
       if (*tp0 == *tp1) {                  // don't do anything if proposal parse is same as old parse
+        //std::cout << "tp0 == tp1" << std::endl;
 	    if (debug >= 1000)
 	      std::cerr << ", tp0 == tp1" << std::flush;
 	    ++unchanged;
-	    g.incrtree(tp1, 1);  
+	    g.incrtree(tp1, i >= trains_size);  
 	    tps[i] = tp1;
         tp0->remove_locations(i);
 	    tp0->selective_delete();
@@ -425,8 +449,11 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
             p.add_locations(tps[i], i, 0, trains[i].size());
       }
       else {
-	    F pi1 = g.incrtree(tp1, 1);        // insert proposal parse into CRPs, compute proposal's true probability
+        F pi1 = g.incrtree(tp1, i >= trains_size);        // insert proposal parse into CRPs, compute proposal's true probability
 	// assert(pi1 > 0);
+        //std::cout << "pycache trees after insert" << std::endl;
+        //foreach(sT, it, g.terms_pytrees[trains[i]])
+          //std::cout << *it << std::endl;
 	
 	    if (debug >= 1000)
 	      std::cerr << ", r0 = " << r0 << ", pi0 = " << pi0
@@ -442,7 +469,8 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
 	        std::cerr << ", accept = " << accept << std::flush;
 	      if (random1() <= accept) {      // do we accept the proposal parse?
 	        if (debug >= 1000)            //  yes
-	          std::cerr << ", accepted" << std::flush;
+	          std::cerr << ", accepted " << std::flush;
+            //std::cout << "accepted" << std::endl;
 	        tps[i] = tp1;                 //  insert proposal parse into set of parses
             tp0->remove_locations(i);
 	        tp0->selective_delete();      //  release storage associated with old parse
@@ -451,9 +479,10 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
 	      }  
 	      else {                          // reject proposal parse
 	        if (debug >= 1000)
-	          std::cerr << ", rejected" << std::flush;
-	        g.decrtree(tp1, 1);           // remove proposal parse from CRPs
-	        g.incrtree(tp0, 1);           // reinsert old parse into CRPs
+	          std::cerr << ", rejected " << std::flush;
+            //std::cout << "rejected" << std::endl;
+            g.decrtree(tp1, i >= trains_size);
+	        g.incrtree(tp0, i >= trains_size);           // reinsert old parse into CRPs
 	        tp1->selective_delete();      // release storage associated with proposal parse
 	        ++rejected;
 	      }  
@@ -472,7 +501,7 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
     }
     
     if (iteration < resample_pycache_nits) {
-        //std::cout << "Starting to resample pycache" << std::endl;
+        std::cout << "Starting to resample pycache" << std::endl;
         resample_pycache(g, p, spans);
     }
 
@@ -493,9 +522,9 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
 	    else {
           p.restricted_inside(trains[i], spans[i], false, g.start);
 	      tree* tp = p.random_tree();
-	      g.incrtree(tp, 1);
+	      g.incrtree(tp);
 	      (*finalparses_stream_ptr) << tp << std::endl;
-	      g.decrtree(tp, 1);
+	      g.decrtree(tp);
 	      tp->selective_delete();
 	    } 
         (*finalparses_stream_ptr) << std::endl;
@@ -527,12 +556,12 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
     else {
         p.restricted_inside(trains[i], spans[i], false, g.start);
         tree* tp = p.random_tree();
-      g.incrtree(tp, 1);
+        g.incrtree(tp);
       foreach (Postreamps, ecit, evalcmds) {
 	    pstream::ostream& ec = **ecit;
 	    ec << tp << std::endl;
       }
-      g.decrtree(tp, 1);
+      g.decrtree(tp);
       tp->selective_delete();
     }
   }
@@ -563,11 +592,13 @@ F gibbs_estimate(pycfg_type& g, const Sss& trains,
   
   bool estimate_theta_flag = g.estimate_theta_flag;
   g.estimate_theta_flag = false;
-  for (U i = 0; i < n; ++i) 
+  std::cout << "Done, deleting trees" << std::endl;
+  for (U i = 0; i < n; ++i) {
     if (train_flag[i]) {
-      g.decrtree(tps[i], 1);
+      g.decrtree(tps[i], i >= trains_size);
       tps[i]->selective_delete();
     }
+  }
   g.estimate_theta_flag = estimate_theta_flag;
 
   return logPcorpus;
@@ -653,16 +684,17 @@ int main(int argc, char** argv) {
   U nparses_iterations = 1;
   F train_frac = 1.0;
   bool train_frac_randomise = false;
+  U labelled_weight = 1;
 
   int chr;
-  while ((chr = getopt(argc, argv, "A:CDEF:G:H:I:N:PR:ST:X:Z:a:b:d:e:f:g:h:l:m:n:r:s:t:w:x:z:")) 
+  while ((chr = getopt(argc, argv, "A:CDEF:G:H:I:N:PR:ST:X:Z:a:b:d:e:f:g:h:l:m:n:r:s:t:w:x:z:y:")) 
 	 != -1)
     switch (chr) {
     case 'A':
       parses_filename = optarg;
       break;
     case 'C':
-      catcounttree_type::compact_trees = true;
+      catcountloctree_type::compact_trees = true;
       break;
     case 'D':
       delayed_initialization = true;
@@ -749,6 +781,9 @@ int main(int argc, char** argv) {
     case 'x':
       eval_every = atoi(optarg);
       break;
+    case 'y':
+      g.labelled_coef = atoi(optarg);
+      break;
     case 'z':
       z_its = atoi(optarg);
       break;    default:
@@ -761,6 +796,12 @@ int main(int argc, char** argv) {
     std::cerr << "# Error in " << argv[0] 
 	      << ", argc = " << argc << ", optind = " << optind << '\n' 
 	      << usage << std::endl;
+  
+  if (g.labelled_coef > 1 && resample_pycache_nits == -1) {
+      std::cerr << "table label sampling cannot be done at the same time with labelled data reweighting" << std::endl;
+      std::cerr << "turning off table label resampling" << std::endl;
+      resample_pycache_nits = 0;
+  }
 
   if (debug >= 1000) 
     std::cerr << "# eval_cmds = " << evalcmdstrs << std::endl;
@@ -837,6 +878,7 @@ int main(int argc, char** argv) {
 		      << ", N = " << nparses_iterations
 		      << ", P = " << predictive_parse_filter
 		      << ", w = " << g.default_weight
+              << ", y = " << labelled_weight
 		      << ", a = " << g.default_pya
 		      << ", b = " << g.default_pyb
 		      << ", e = " << g.pya_beta_a
